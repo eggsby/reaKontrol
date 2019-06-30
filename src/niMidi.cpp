@@ -30,23 +30,23 @@ const unsigned char CMD_HELLO = 0x01;
 const unsigned char CMD_GOODBYE = 0x02;
 const unsigned char CMD_PLAY = 0x10;
 const unsigned char CMD_RESTART = 0x11;
-const unsigned char CMD_REC = 0x12;
-const unsigned char CMD_COUNT = 0x13; // ToDo: Idea: Use this for pre-roll or record arm selected track?
+const unsigned char CMD_REC = 0x12; // ToDo: ExtEdit: Toggle record arm for selected track (#9)
+const unsigned char CMD_COUNT = 0x13;
 const unsigned char CMD_STOP = 0x14;
-const unsigned char CMD_CLEAR = 0x15; // ToDo: Idea: Use this to remove currently selected track? Or delete MIDI in currently recorded item?
-const unsigned char CMD_LOOP = 0x16;
+const unsigned char CMD_CLEAR = 0x15; // ToDo: ExtEdit: Remove Selected Track (#40005)
+const unsigned char CMD_LOOP = 0x16; // ToDo: ExtEdit: Change right edge of time selection +/- 1 beat length: +(#40631, #40841, #40626), -(#40631, #40842, #40626)
 const unsigned char CMD_METRO = 0x17;
-const unsigned char CMD_TEMPO = 0x18;
+const unsigned char CMD_TEMPO = 0x18; // ToDo: ExtEdit: Change project tempo in 1 bpm steps decrease/increase (#41130/#41129)
 const unsigned char CMD_UNDO = 0x20;
 const unsigned char CMD_REDO = 0x21;
-const unsigned char CMD_QUANTIZE = 0x22; // ToDo: Input Quantize
+const unsigned char CMD_QUANTIZE = 0x22;
 const unsigned char CMD_AUTO = 0x23;
 const unsigned char CMD_NAV_TRACKS = 0x30;
 const unsigned char CMD_NAV_BANKS = 0x31;
 const unsigned char CMD_NAV_CLIPS = 0x32;
 const unsigned char CMD_NAV_SCENES = 0x33; // not used in NIHIA?
 const unsigned char CMD_MOVE_TRANSPORT = 0x34;
-const unsigned char CMD_MOVE_LOOP = 0x35; // ToDo: LOOP + 4D Encoder Rotate. Idea: Use this to change time selection length (action 40322/40323)? Or project BPM? Or change length of MIDI item?
+const unsigned char CMD_MOVE_LOOP = 0x35;
 const unsigned char CMD_TRACK_AVAIL = 0x40;
 const unsigned char CMD_SET_KK_INSTANCE = 0x41;
 const unsigned char CMD_TRACK_SELECTED = 0x42;
@@ -74,8 +74,8 @@ const unsigned char CMD_KNOB_PAN4 = 0x5c;
 const unsigned char CMD_KNOB_PAN5 = 0x5d;
 const unsigned char CMD_KNOB_PAN6 = 0x5e;
 const unsigned char CMD_KNOB_PAN7 = 0x5f;
-const unsigned char CMD_PLAY_CLIP = 0x60; // Used here to switch Mixer view to the bank containing the currently focused (= selected) track
-const unsigned char CMD_STOP_CLIP = 0x61; // ToDo: SHIFT + 4D Encoder Push. Idea: Use this to loop play currently selected item (maybe flip with above functionality then)?
+const unsigned char CMD_PLAY_CLIP = 0x60; // ToDo: ExtEdit: Insert track (#40001)
+const unsigned char CMD_STOP_CLIP = 0x61; // ToDo: SHIFT + 4D Encoder Push. Enter extEditMode.
 const unsigned char CMD_PLAY_SCENE = 0x62; // not used in NIHIA?
 const unsigned char CMD_RECORD_SESSION = 0x63; // not used in NIHIA?
 const unsigned char CMD_CHANGE_SEL_TRACK_VOLUME = 0x64;
@@ -120,7 +120,8 @@ static unsigned char volToChar_KkMk2(double volume) {
 	// Direct linear logarithmic conversion to KK Mk2 Meter Scaling.
 	// Contrary to Reaper's Peak Volume Meters the dB interval spacing on KK Mk2 displays is NOT linear.
 	// It is assumed that other NI Keyboards use the same scaling for the meters.
-	// Midi #127 = +6dB #106 = 0dB, #68 = -12dB, #38 = -24dB, #16 = -48dB, #2 = -96dB, #1 = -infinite
+	// Peak: Midi #127 = +6dB #106 = 0dB, #68 = -12dB, #38 = -24dB, #16 = -48dB, #2 = -96dB, #1 = -infinite
+	// VolMarker: Midi #127 = +6dB #109 = 0dB, #68 = -12dB, #38 = -24dB, #12 = -48dB, #2 = -96dB, #0 = -infinite
 	constexpr double minus48dB = 0.00398107170553497250;
 	constexpr double minus96dB = 1.5848931924611134E-05;
 	constexpr double m = (16.0 - 2.0) / (minus48dB - minus96dB);
@@ -166,6 +167,8 @@ class NiMidiSurface: public BaseSurface {
 		this->_sendCc(CMD_HELLO, 0);
 		this->_sendCc(CMD_UNDO, 1);
 		this->_sendCc(CMD_REDO, 1);
+		this->_sendCc(CMD_CLEAR, 1);
+		this->_sendCc(CMD_QUANTIZE, 1);
 	}
 
 	virtual ~NiMidiSurface() {
@@ -179,7 +182,14 @@ class NiMidiSurface: public BaseSurface {
 	virtual const char* GetDescString() override {
 		return "Komplete Kontrol S-series Mk2/A-series/M-series";
 	}
-		
+
+	virtual void Run() override {
+		// Moved from main to deal with activities specific to S-Mk2/A/M series and not applicable to S-Mk1 keyboards
+		this->_peakMixerUpdate();
+		// --------------------------------------------------------------------------------
+		BaseSurface::Run();
+	}
+
 	virtual void SetPlayState(bool play, bool pause, bool rec) override {
 #ifdef CALLBACK_DIAGNOSTICS
 		ostringstream s;
@@ -192,10 +202,12 @@ class NiMidiSurface: public BaseSurface {
 		}
 		else {
 			this->_sendCc(CMD_REC, 0);
+			this->_disableRecCountIn(); // disable count-in for recording
 		}
 		if (pause) {
 			this->_sendCc(CMD_PLAY, 1);
 			this->_sendCc(CMD_STOP, 1); // since there is no Pause button on KK we indicate it with both Play and Stop lit
+			this->_disableRecCountIn(); // disable count-in for recording
 		}
 		else if (play) {
 			this->_sendCc(CMD_PLAY, 1);
@@ -204,6 +216,7 @@ class NiMidiSurface: public BaseSurface {
 		else {
 			this->_sendCc(CMD_PLAY, 0);
 			this->_sendCc(CMD_STOP, 1);
+			this->_disableRecCountIn(); // disable count-in for recording
 		}
 	}
 		
@@ -221,9 +234,6 @@ class NiMidiSurface: public BaseSurface {
 			this->_sendCc(CMD_LOOP, 0);
 		}
 	}
-
-	// ToDo: add button lights for 4D encoder navigation (blue LEDs)
-
 	
 	virtual void SetTrackListChange() override {
 #ifdef CALLBACK_DIAGNOSTICS
@@ -280,7 +290,19 @@ class NiMidiSurface: public BaseSurface {
 				this->_bankStart = id - numInBank;
 				if (this->_bankStart != oldBankStart) {
 					// Update everything
-					this->_allMixerUpdate(); // Note: this will also update the g_muteStateBank and g_soloStateBank caches
+					this->_allMixerUpdate(); // Note: this will also update 4D track nav LEDs, g_muteStateBank and g_soloStateBank caches
+				}
+				else {
+					// Update 4D Encoder track navigation LEDs
+					int numTracks = CSurf_NumTracks(false);
+					int trackNavLights = 3; // left and right on
+					if (g_trackInFocus < 2) {
+						trackNavLights &= 2; // left off
+					}
+					if (g_trackInFocus >= numTracks) {
+						trackNavLights &= 1; // right off
+					}
+					this->_sendCc(CMD_NAV_TRACKS, trackNavLights);
 				}
 				if (g_trackInFocus != 0) {
 					// Mark selected track as available and update Mute and Solo Button lights
@@ -476,6 +498,8 @@ class NiMidiSurface: public BaseSurface {
 		return 1;
 	}
 
+	//===============================================================================================================================
+
 	protected:
 	void _onMidiEvent(MIDI_event_t* event) override {
 		if (event->midi_message[0] != MIDI_CC) {
@@ -510,14 +534,25 @@ class NiMidiSurface: public BaseSurface {
 				CSurf_GoStart();
 				if (GetPlayState() & ~1) {
 					// Only play if current state is not playing
+					// ToDo: also need to check if recording! Because otherwise we can end up playing from start while recording elsewhere on timeline!
 					CSurf_OnPlay();
 				}
 				break;
 			case CMD_REC:
 				CSurf_OnRecord();
 				break;
+			case CMD_COUNT:
+				Main_OnCommand(41745, 0); // Enable the metronome
+				this->_enableRecCountIn(); // Enable count-in for recording
+				CSurf_OnRecord();
+				break;
 			case CMD_STOP:
 				CSurf_OnStop();
+				break;
+			case CMD_CLEAR:
+				// Delete active takes. Typically, when recording an item in loop mode this allows to remove take by take until the entire item is removed.
+				Main_OnCommand(40129, 0); // Edit: Delete active take (leaves empty lane if other takes present in item)
+				Main_OnCommand(41349, 0); // Edit: Remove the empty take lane before the active take
 				break;
 			case CMD_LOOP:
 				Main_OnCommand(1068, 0); // Transport: Toggle repeat
@@ -534,6 +569,12 @@ class NiMidiSurface: public BaseSurface {
 			case CMD_REDO:
 				Main_OnCommand(40030, 0); // Edit: Redo
 				break;
+			case CMD_QUANTIZE:
+				Main_OnCommand(42033, 0); // Toggle input quantize for selected track
+				Main_OnCommand(40604, 0); // Open window showing track record settings
+				// ToDo: Can we close the windows by e.g. SetCursorContext()?
+				// ToDo: Consider indicating quantize state on keyboard by flashing button light. However, polling not CPU efficient...
+				break;
 			case CMD_AUTO:
 				this->_onSelAutoToggle();
 				break;
@@ -546,6 +587,7 @@ class NiMidiSurface: public BaseSurface {
 				this->_onBankSelect(convertSignedMidiValue(value));
 				break; 
 			case CMD_NAV_CLIPS:
+				// ToDo: Consider to also update the 4D encoder LEDs depending on marker presence and playhead position
 				// Value is -1 or 1.
 				Main_OnCommand(value == 1 ?
 					40173 : // Markers: Go to next marker/project end
@@ -553,11 +595,20 @@ class NiMidiSurface: public BaseSurface {
 				0);
 				break;
 			case CMD_MOVE_TRANSPORT:
-				// ToDo: Scrubbing very slow. Rather than just amplifying this value
-				// have to evaluate incoming MIDI stream to allow for both fine as well
-				// coarse scrubbing
-				// Or move to next beat, bar etc
-				CSurf_ScrubAmt(convertSignedMidiValue(value)); 
+				if (value <= 63) {
+					Main_OnCommand(40647, 0); // move cursor right 1 grid division (no seek)
+				}
+				else {
+					Main_OnCommand(40646, 0); // move cursor left 1 grid division (no seek)
+				}
+				break;
+			case CMD_MOVE_LOOP:
+				if (value <= 63) {
+					Main_OnCommand(40038, 0); // Shift time selection right (by its own length)
+				}
+				else {
+					Main_OnCommand(40037, 0); // Shift time selection left (by its own length)
+				}
 				break;
 			case CMD_TRACK_SELECTED:
 				// Select a track from current bank in Mixer Mode with top row buttons
@@ -593,8 +644,7 @@ class NiMidiSurface: public BaseSurface {
 				break;
 			case CMD_PLAY_CLIP:
 				// We use this for a different purpose: switch Mixer view to the bank containing the currently focused (= selected) track
-				this->_bankStart = (int)(g_trackInFocus / BANK_NUM_TRACKS) * BANK_NUM_TRACKS;
-				this->_allMixerUpdate();
+				_onRefocusBank();
 				break;
 			case CMD_CHANGE_SEL_TRACK_VOLUME:
 				this->_onSelTrackVolumeChange(convertSignedMidiValue(value));
@@ -621,20 +671,27 @@ class NiMidiSurface: public BaseSurface {
 		}
 	}
 
-	void _peakMixerUpdate() override {
+	//===============================================================================================================================
+
+	private:
+	int _protocolVersion = 0;
+	int _bankStart = 0;
+	int _bankEnd = 0;
+
+	void _peakMixerUpdate() {
 		// Peak meters. Note: Reaper reports peak, NOT VU	
 
 		// ToDo: Peak Hold in KK display shall be erased immediately when changing bank
 		// ToDo: Peak Hold in KK display shall be erased after decay time t when track muted or no signal.
 		// ToDo: Explore the effect of sending CMD_SEL_TRACK_PARAMS_CHANGED after sending CMD_TRACK_VU
 		// ToDo: Consider caching and not sending anything via SysEx if no values have changed.
-		
+
 		// Meter information is sent to KK as array (string of chars) for all 16 channels (8 x stereo) of one bank.
 		// A value of 0 will result in stopping to refresh meters further to right as it is interpretated as "end of string".
 		// peakBank[0]..peakBank[31] are used for data. The array needs one additional last char peakBank[32] set as "end of string" marker.
 		static char peakBank[(BANK_NUM_TRACKS * 2) + 1];
 		int j = 0;
-		double peakValue = 0;		
+		double peakValue = 0;
 		int numInBank = 0;
 		for (int id = this->_bankStart; id <= this->_bankEnd; ++id, ++numInBank) {
 			MediaTrack* track = CSurf_TrackFromID(id, false);
@@ -688,11 +745,6 @@ class NiMidiSurface: public BaseSurface {
 		this->_sendSysex(CMD_TRACK_VU, 2, 0, peakBank);
 	}
 
-	private:
-	int _protocolVersion = 0;
-	int _bankStart = 0;
-	int _bankEnd = 0;
-
 	void _allMixerUpdate() {
 #ifdef CALLBACK_DIAGNOSTICS
 		ostringstream s;
@@ -702,7 +754,7 @@ class NiMidiSurface: public BaseSurface {
 		int numInBank = 0;
 		this->_bankEnd = this->_bankStart + BANK_NUM_TRACKS - 1; // avoid ambiguity: track counting always zero based
 		int numTracks = CSurf_NumTracks(false); 
-		// Set bank select button lights
+		// Update bank select button lights
 		// ToDo: Consider optimizing this piece of code
 		int bankLights = 3; // left and right on
 		if (numTracks < BANK_NUM_TRACKS) {
@@ -723,6 +775,16 @@ class NiMidiSurface: public BaseSurface {
 				this->_sendSysex(CMD_TRACK_AVAIL, 0, i);				
 			}
 		}
+		// Update 4D Encoder track navigation LEDs
+		int trackNavLights = 3; // left and right on
+		if (g_trackInFocus < 2) {
+			trackNavLights &= 2; // left off
+		}
+		if (g_trackInFocus >= numTracks) {
+			trackNavLights &= 1; // right off
+		}
+		this->_sendCc(CMD_NAV_TRACKS, trackNavLights);
+		// Update current bank
 		for (int id = this->_bankStart; id <= this->_bankEnd; ++id, ++numInBank) {
 			MediaTrack* track = CSurf_TrackFromID(id, false);
 			if (!track) {
@@ -825,6 +887,26 @@ class NiMidiSurface: public BaseSurface {
 		this->_allMixerUpdate();
 	}
 
+	void _onRefocusBank() {
+		// Switch Mixer view to the bank containing the currently focused (= selected) track and also focus Reaper's TCP and MCP
+		if (g_trackInFocus < 1) {
+			return;
+		}
+		int numTracks = CSurf_NumTracks(false);
+		// Backstop measure to protect against unreported track removal that was not captured in SetTrackListChange callback due to race condition
+		if (g_trackInFocus > numTracks) {
+			g_trackInFocus = numTracks;
+		}
+		MediaTrack* track = CSurf_TrackFromID(g_trackInFocus, false);
+		int iSel = 1; // "Select"
+		_clearAllSelectedTracks();
+		GetSetMediaTrackInfo(track, "I_SELECTED", &iSel);
+		Main_OnCommand(40913, 0); // Vertical scroll selected track into view (TCP)
+		SetMixerScroll(track); // Horizontal scroll making the selected track the leftmost track if possible (MCP)
+		this->_bankStart = (int)(g_trackInFocus / BANK_NUM_TRACKS) * BANK_NUM_TRACKS;
+		this->_allMixerUpdate();
+	}
+
 	void _onTrackMute(unsigned char numInBank) {
 		int id = this->_bankStart + numInBank;
 		if ((id == 0) || (id > CSurf_NumTracks(false))) {
@@ -852,8 +934,7 @@ class NiMidiSurface: public BaseSurface {
 		if (!track) {
 			return;
 		}
-		CSurf_SetSurfaceVolume(track, CSurf_OnVolumeChange(track, dvalue * 0.007874, true), nullptr); 
-		// scaling by dividing by 127 (0.007874)
+		CSurf_SetSurfaceVolume(track, CSurf_OnVolumeChange(track, dvalue / 126.0, true), nullptr); 
 		// ToDo: non linear behaviour especially in the lower volumes would be preferable. 
 	}
 
@@ -866,17 +947,22 @@ class NiMidiSurface: public BaseSurface {
 		}
 		CSurf_SetSurfacePan(track, CSurf_OnPanChange(track, dvalue * 0.00098425, true), nullptr); 
 		// scaling by dividing by 127*8 (0.00098425)
+		// ToDo: slightly change this?
 	}
 
 	void _onSelTrackVolumeChange(signed char value) {
-		double dvalue = static_cast<double>(value);
+		// Coarse scaling ( value = +/-63): exactly 1dB step per single click
+		// Fine scaling (value = +/- 12): exactly 0.1dB per single click
 		MediaTrack* track = CSurf_TrackFromID(g_trackInFocus, false);
 		if (!track) {
 			return;
 		}
-		CSurf_SetSurfaceVolume(track, CSurf_OnVolumeChange(track, dvalue * 0.007874, true), nullptr);
-		// ToDo: Consider different scaling than with KnobVolumeChange
-		// ToDo: non linear behaviour especially in the lower volumes would be preferable. 
+		if (value >=0 ) {
+			CSurf_SetSurfaceVolume(track, CSurf_OnVolumeChange(track, value > 38 ? 1.0 : 0.1, true), nullptr);
+		}
+		else {
+			CSurf_SetSurfaceVolume(track, CSurf_OnVolumeChange(track, value < -38 ? -1.0 : -0.1, true), nullptr);
+		}
 	}
 
 	void _onSelTrackPanChange(signed char value) {
@@ -939,6 +1025,63 @@ class NiMidiSurface: public BaseSurface {
 		}
 	}
 
+	/*
+	bool _isSelTrackInputQuantize() {
+		MediaTrack* track = CSurf_TrackFromID(g_trackInFocus, false);
+		if (!track) {
+			return false;
+		}
+		// ToDo:
+		// Note: the below code is wasteful in terms of resource usage (memory and CPU). This is ok as long as we do not
+		// poll for InputQuantize state frequently, i.e. just on button push. If this changes in the future the code
+		// can be improved in many ways (e.g. reducing the search to start at position (200 + [track name length]) which is the
+		// approximate position in rppXML for INQ). Also avoids the misinterpretation of a track name containing "INQ "...
+		char rppxml[514];
+		rppxml[513] = '\0';
+		int size = 512;
+		GetTrackStateChunk(track, rppxml, size, false);
+		// rppxml contains keyword "INQ" for InputQuantize followed by numbers separated by spaces. Encoding:
+		// enabled = t[1],
+		// grid = t[4],
+		// positioning = t[2], -- 0 nearest - 1 previous 1 next
+		// quantize_NoteOffs = t[3],
+		// strength = t[5],
+		// swing = t[6],
+		// quantize_within1 = t[7],
+		// quantize_within2 = t[8]
+		char *pos = strstr(rppxml, "INQ ");
+		ptrdiff_t index = pos - rppxml;
+		index += 4;
+		if (rppxml[index] == '1') {
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+
+	void _onQuantize() {
+		// Toggle MIDI Input Quantize for selected track enable / disable(#42063 / #42064)
+		
+		// ToDo: How to indicate quantize state on keyboard?? Maybe flash the button?
+		// Polling quantize state could be done in SetSurfaceSelected() for the currently selected track
+		
+		// ToDo: Can we close these windows by e.g. SetCursorContext(), or smth w DockWindowRemove, DockWindowRefresh...? Could be triggered when receiving any other MIDI CC command...
+		// changing cursor/mouse context could be quite annoying if triggered from GUI -> only consider for MIDI CCs...
+		// If this works consider settings cursor context back to what is was, i.e. first store GetCursorContext()
+		// or checkout SWS Focus main window _S&M_WINMAIN ...
+
+		if (_isSelTrackInputQuantize()) {
+			Main_OnCommand(42064, 0); // disable input quantize for selected track
+			Main_OnCommand(40604, 0); // open window showing track record settings
+		}
+		else {
+			Main_OnCommand(42063, 0); // disable input quantize for selected track
+			Main_OnCommand(40604, 0); // open window showing track record settings
+		}
+	}
+	*/
+
 	void* GetConfigVar(const char* cVar) { // Copyright (c) 2010 and later Tim Payne (SWS), Jeffos
 		int sztmp;
 		void* p = NULL;
@@ -956,6 +1099,14 @@ class NiMidiSurface: public BaseSurface {
 	void _metronomeUpdate() {
 		// Actively poll the metronome status on project tab changes
 		this->_sendCc(CMD_METRO, (*(int*)GetConfigVar("projmetroen") & 1));
+	}
+
+	void _enableRecCountIn() {
+		*(int*)GetConfigVar("projmetroen") |= 16; 
+	}
+
+	void _disableRecCountIn() {
+		*(int*)GetConfigVar("projmetroen") &= ~16;
 	}
 
 	void _sendCc(unsigned char command, unsigned char value) {

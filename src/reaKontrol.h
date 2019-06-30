@@ -58,6 +58,8 @@
 #define REAPERAPI_WANT_projectconfig_var_getoffs
 #define REAPERAPI_WANT_projectconfig_var_addr
 #define REAPERAPI_WANT_EnumProjects
+#define REAPERAPI_WANT_SetMixerScroll
+#define REAPERAPI_WANT_GetTrackStateChunk
 
 
 #include <reaper/reaper_plugin.h>
@@ -79,7 +81,6 @@ class BaseSurface: public IReaperControlSurface {
 	midi_Input* _midiIn = nullptr;
 	midi_Output* _midiOut = nullptr;
 	virtual void _onMidiEvent(MIDI_event_t* event) = 0;
-	virtual void _peakMixerUpdate() = 0;
 };
 
 IReaperControlSurface* createNiMidiSurface(int inDev, int outDev);
