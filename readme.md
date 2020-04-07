@@ -31,6 +31,7 @@ If you haven't done this before, get the "Command Line Tools for Xcode" and git 
 
 - git clone https://github.com/brummbrum/reaKontrol.git
 - cd reaKontrol
+- git submodule update --init --recursive
 - make -f Makefile.osx install
 
 If you just want to compile the shared library and copy it yourself, you can just do `make -f Makefile.osx`, 
